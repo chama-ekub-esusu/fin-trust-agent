@@ -1,5 +1,8 @@
-import { supabase } from '@/lib/supabase/client';
-import { Database } from '@/types/database';
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = 'https://clgwpwtfsjspoybnikpd.supabase.co';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 interface AuditLogPayload {
   organizationId: string;
