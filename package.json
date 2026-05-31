@@ -5,9 +5,14 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "lint": "eslint src --ext ts,tsx",
+    "lint:fix": "eslint src --ext ts,tsx --fix",
+    "format": "prettier --write \"src/**/*.{ts,tsx,json,md}\""
   },
   "dependencies": {
+    "@google/generative-ai": "^0.3.0",
+    "@pinecone-database/pinecone": "^1.1.0",
     "@supabase/auth-helpers-nextjs": "^0.15.0",
     "@supabase/supabase-js": "^2.106.2",
     "next": "^14.2.3",
@@ -17,6 +22,11 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.42",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.55.0",
+    "eslint-config-next": "^14.2.3",
+    "prettier": "^3.1.0",
     "typescript": "^5.3.3"
   }
 }
