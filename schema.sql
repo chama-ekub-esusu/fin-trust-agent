@@ -3,13 +3,17 @@
 -- Immutable Financial Ledger + Role-Based Access Control
 -- ============================================================================
 
+-- IMPORTANT: Enable pgvector extension
+-- Run this in Supabase SQL editor:
+-- CREATE EXTENSION IF NOT EXISTS vector;
+
 -- 1. ORGANIZATIONS (Chamas/Esusu Groups)
-CREATE TABLE organizations (
+CREATE TABLE IF NOT EXISTS organizations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name VARCHAR(255) NOT NULL,
   description TEXT,
-  country VARCHAR(100),
-  currency VARCHAR(3) DEFAULT 'KES',
+  country_code VARCHAR(2),
+  currency_code VARCHAR(3),
   timezone VARCHAR(50) DEFAULT 'UTC',
   status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'archived', 'suspended')),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -17,14 +21,14 @@ CREATE TABLE organizations (
 );
 
 -- 2. MEMBERS (with Encrypted PII)
-CREATE TABLE members (
+CREATE TABLE IF NOT EXISTS members (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   email VARCHAR(255) NOT NULL,
-  phone_encrypted TEXT, -- Encrypted using pgcrypto or app-level
+  phone_encrypted TEXT,
   first_name_encrypted TEXT,
   last_name_encrypted TEXT,
-  id_number_encrypted TEXT, -- National ID, encrypted
+  id_number_encrypted TEXT,
   kyc_status VARCHAR(50) DEFAULT 'pending' CHECK (kyc_status IN ('pending', 'verified', 'rejected')),
   join_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
@@ -33,38 +37,55 @@ CREATE TABLE members (
   UNIQUE(organization_id, email)
 );
 
+CREATE INDEX idx_members_org ON members(organization_id);
+CREATE INDEX idx_members_email ON members(email);
+
 -- 3. ROLES (RBAC Definitions)
-CREATE TABLE roles (
+CREATE TABLE IF NOT EXISTS roles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name VARCHAR(50) NOT NULL UNIQUE,
   description TEXT,
-  permissions JSONB DEFAULT '[]'::jsonb -- Stores permission list as JSON
+  permissions JSONB DEFAULT '[]'::jsonb,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Insert default roles
 INSERT INTO roles (name, description, permissions) VALUES
 ('chairman', 'Group leader with oversight and dispute resolution authority', 
-  '["view_all_transactions", "initiate_disputes", "override_approvals", "manage_members", "view_reports"]'::jsonb),
+  '["view_all_transactions", "initiate_disputes", "override_approvals", "manage_members", "view_reports"]'::jsonb)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO roles (name, description, permissions) VALUES
 ('treasurer', 'Financial officer with exclusive ledger editing privileges',
-  '["record_transactions", "edit_ledger", "manage_funds", "generate_statements", "view_all_transactions"]'::jsonb),
+  '["record_transactions", "edit_ledger", "manage_funds", "generate_statements", "view_all_transactions"]'::jsonb)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO roles (name, description, permissions) VALUES
 ('member', 'Regular member with read-only access to personal statements and group treasury',
-  '["view_personal_statement", "view_treasury_balance", "request_loan"]'::jsonb),
+  '["view_personal_statement", "view_treasury_balance", "request_loan"]'::jsonb)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO roles (name, description, permissions) VALUES
 ('admin', 'System administrator',
-  '["view_all_transactions", "manage_members", "manage_roles", "view_reports", "system_configuration"]'::jsonb);
+  '["view_all_transactions", "manage_members", "manage_roles", "view_reports", "system_configuration"]'::jsonb)
+ON CONFLICT (name) DO NOTHING;
 
 -- 4. MEMBER ROLES (Assignment Table)
-CREATE TABLE member_roles (
+CREATE TABLE IF NOT EXISTS member_roles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   assigned_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  assigned_by UUID, -- Tracks who assigned the role
+  assigned_by UUID,
   UNIQUE(member_id, role_id, organization_id)
 );
 
+CREATE INDEX idx_member_roles_member ON member_roles(member_id);
+CREATE INDEX idx_member_roles_org ON member_roles(organization_id);
+
 -- 5. BYLAWS/CONSTITUTION (for RAG Mediation)
-CREATE TABLE bylaws (
+CREATE TABLE IF NOT EXISTS bylaws (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   version INT DEFAULT 1,
@@ -76,48 +97,46 @@ CREATE TABLE bylaws (
   status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'archived', 'draft'))
 );
 
+CREATE INDEX idx_bylaws_org ON bylaws(organization_id);
+CREATE INDEX idx_bylaws_status ON bylaws(status);
+
 -- 6. IMMUTABLE TRANSACTION LEDGER (Core of the System)
-CREATE TABLE transactions (
+CREATE TABLE IF NOT EXISTS transactions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   
-  -- Transaction Details
   type VARCHAR(50) NOT NULL CHECK (type IN ('contribution', 'loan_disbursement', 'loan_repayment', 'penalty', 'dividend', 'withdrawal', 'interest')),
   amount DECIMAL(15, 2) NOT NULL CHECK (amount > 0),
   currency VARCHAR(3),
   description TEXT,
   
-  -- Timestamps
   transaction_date TIMESTAMP WITH TIME ZONE NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   
-  -- Audit Trail
   created_by UUID NOT NULL REFERENCES members(id),
   status VARCHAR(50) DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'reversed')),
   
-  -- Reference to reversing entry (if applicable)
-  reversed_by UUID, -- References another transaction ID for reversals
+  reversed_by UUID,
   reversal_reason TEXT,
-  reversal_date TIMESTAMP WITH TIME ZONE,
-  
-  INDEX idx_organization_date (organization_id, transaction_date),
-  INDEX idx_member_org (member_id, organization_id),
-  INDEX idx_type_date (type, transaction_date)
+  reversal_date TIMESTAMP WITH TIME ZONE
 );
 
+CREATE INDEX idx_transactions_org_date ON transactions(organization_id, transaction_date);
+CREATE INDEX idx_transactions_member_org ON transactions(member_id, organization_id);
+CREATE INDEX idx_transactions_type_date ON transactions(type, transaction_date);
+CREATE INDEX idx_transactions_status ON transactions(status);
+
 -- 7. CONTRIBUTION TRACKING (Scheduled Contributions)
-CREATE TABLE contributions (
+CREATE TABLE IF NOT EXISTS contributions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   
-  -- Contribution Schedule
   amount DECIMAL(15, 2) NOT NULL CHECK (amount > 0),
   frequency VARCHAR(50) NOT NULL CHECK (frequency IN ('daily', 'weekly', 'monthly', 'quarterly', 'annual')),
-  due_date INT, -- Day of month (1-31) or day of week for recurring
+  due_date INT,
   
-  -- Status Tracking
   status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed')),
   start_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   end_date TIMESTAMP WITH TIME ZONE,
@@ -126,65 +145,66 @@ CREATE TABLE contributions (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE INDEX idx_contributions_member ON contributions(member_id);
+CREATE INDEX idx_contributions_status ON contributions(status);
+
 -- 8. LOANS (Loan Management)
-CREATE TABLE loans (
+CREATE TABLE IF NOT EXISTS loans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   
-  -- Loan Details
   principal_amount DECIMAL(15, 2) NOT NULL CHECK (principal_amount > 0),
   interest_rate DECIMAL(5, 2) NOT NULL DEFAULT 0,
   tenure_months INT NOT NULL,
   disbursement_date TIMESTAMP WITH TIME ZONE,
   maturity_date TIMESTAMP WITH TIME ZONE,
   
-  -- Status
   status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'disbursed', 'active', 'completed', 'defaulted', 'written_off')),
   
-  -- Audit
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   created_by UUID NOT NULL REFERENCES members(id),
   approved_at TIMESTAMP WITH TIME ZONE,
   approved_by UUID,
   
-  INDEX idx_member_status (member_id, status),
-  INDEX idx_org_status (organization_id, status)
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE INDEX idx_loans_member_status ON loans(member_id, status);
+CREATE INDEX idx_loans_org_status ON loans(organization_id, status);
+
 -- 9. LOAN REPAYMENT SCHEDULE
-CREATE TABLE loan_repayments (
+CREATE TABLE IF NOT EXISTS loan_repayments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   loan_id UUID NOT NULL REFERENCES loans(id) ON DELETE CASCADE,
   
-  -- Schedule
   installment_number INT NOT NULL,
   due_date TIMESTAMP WITH TIME ZONE NOT NULL,
   scheduled_amount DECIMAL(15, 2) NOT NULL,
   
-  -- Payment Tracking
   amount_paid DECIMAL(15, 2) DEFAULT 0,
   paid_date TIMESTAMP WITH TIME ZONE,
   status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'paid', 'overdue', 'waived')),
   
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   
-  INDEX idx_loan_status (loan_id, status),
-  INDEX idx_due_date (due_date)
+  UNIQUE(loan_id, installment_number)
 );
 
+CREATE INDEX idx_loan_repayments_loan ON loan_repayments(loan_id);
+CREATE INDEX idx_loan_repayments_status ON loan_repayments(status);
+CREATE INDEX idx_loan_repayments_due_date ON loan_repayments(due_date);
+
 -- 10. PENALTIES & FINES (Dynamic Penalty Tracking)
-CREATE TABLE penalties (
+CREATE TABLE IF NOT EXISTS penalties (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   
-  -- Penalty Details
   reason VARCHAR(255) NOT NULL,
   amount DECIMAL(15, 2) NOT NULL CHECK (amount > 0),
   due_date TIMESTAMP WITH TIME ZONE,
   
-  -- Status
   status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'waived', 'paid')),
   waived_reason TEXT,
   waived_by UUID,
@@ -193,133 +213,127 @@ CREATE TABLE penalties (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   created_by UUID NOT NULL REFERENCES members(id),
   
-  INDEX idx_member_status (member_id, status),
-  INDEX idx_due_date (due_date)
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE INDEX idx_penalties_member_status ON penalties(member_id, status);
+CREATE INDEX idx_penalties_due_date ON penalties(due_date);
+
 -- 11. AUDIT LOG (Immutable Record of All Changes)
-CREATE TABLE audit_logs (
+CREATE TABLE IF NOT EXISTS audit_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   
-  -- What Changed
-  entity_type VARCHAR(100) NOT NULL, -- 'transaction', 'loan', 'member', etc.
+  entity_type VARCHAR(100) NOT NULL,
   entity_id UUID NOT NULL,
   action VARCHAR(50) NOT NULL CHECK (action IN ('create', 'update', 'delete', 'reverse', 'approve', 'reject')),
   
-  -- Change Details
-  changes JSONB, -- Old and new values
+  changes JSONB,
   reason TEXT,
   
-  -- Who & When
   performed_by UUID NOT NULL REFERENCES members(id),
   performed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  ip_address VARCHAR(45), -- For security tracking
-  
-  INDEX idx_entity (entity_type, entity_id),
-  INDEX idx_performed_at (performed_at),
-  INDEX idx_org_performed (organization_id, performed_at)
+  ip_address VARCHAR(45)
 );
 
+CREATE INDEX idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
+CREATE INDEX idx_audit_logs_performed_at ON audit_logs(performed_at);
+CREATE INDEX idx_audit_logs_org_performed ON audit_logs(organization_id, performed_at);
+
 -- 12. NOTIFICATIONS (Smart Reminders)
-CREATE TABLE notifications (
+CREATE TABLE IF NOT EXISTS notifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   
-  -- Notification Details
   type VARCHAR(50) NOT NULL CHECK (type IN ('contribution_due', 'loan_due', 'penalty_due', 'loan_approved', 'dispute_update', 'system_alert')),
   title VARCHAR(255) NOT NULL,
   message TEXT,
   
-  -- Status
   status VARCHAR(50) DEFAULT 'unread' CHECK (status IN ('unread', 'read', 'archived')),
   read_at TIMESTAMP WITH TIME ZONE,
   
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   
-  INDEX idx_member_unread (member_id, status),
-  INDEX idx_created_at (created_at)
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE INDEX idx_notifications_member_unread ON notifications(member_id, status);
+CREATE INDEX idx_notifications_created_at ON notifications(created_at);
+
 -- 13. DISPUTES (Mediation & Resolution)
-CREATE TABLE disputes (
+CREATE TABLE IF NOT EXISTS disputes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   initiated_by UUID NOT NULL REFERENCES members(id),
   
-  -- Dispute Details
   title VARCHAR(255) NOT NULL,
   description TEXT,
   category VARCHAR(50) NOT NULL CHECK (category IN ('loan_default', 'contribution_discrepancy', 'penalty_dispute', 'other')),
   
-  -- Resolution
   status VARCHAR(50) DEFAULT 'open' CHECK (status IN ('open', 'in_review', 'resolved', 'escalated')),
   resolution TEXT,
   resolved_by UUID,
   resolved_at TIMESTAMP WITH TIME ZONE,
   
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  
-  INDEX idx_status (status),
-  INDEX idx_org_date (organization_id, created_at)
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 14. VECTOR EMBEDDINGS (for RAG Constitution Mediation)
-CREATE TABLE bylaw_embeddings (
+CREATE INDEX idx_disputes_status ON disputes(status);
+CREATE INDEX idx_disputes_org_date ON disputes(organization_id, created_at);
+
+-- 14. BYLAW EMBEDDINGS (for RAG Constitution Mediation)
+CREATE TABLE IF NOT EXISTS bylaw_embeddings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bylaw_id UUID NOT NULL REFERENCES bylaws(id) ON DELETE CASCADE,
   
-  -- Text Chunk
   section_number VARCHAR(50),
   section_title VARCHAR(255),
   chunk_text TEXT NOT NULL,
   
-  -- Vector Embedding (1536-dim for Gemini)
-  embedding vector(1536), -- Requires pgvector extension
+  embedding vector(1536),
   
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   
-  INDEX idx_bylaw (bylaw_id)
+  UNIQUE(bylaw_id, section_number)
 );
 
+CREATE INDEX idx_bylaw_embeddings_bylaw ON bylaw_embeddings(bylaw_id);
+
 -- 15. RAG CONVERSATION HISTORY (for Fintrust Agent)
-CREATE TABLE rag_conversations (
+CREATE TABLE IF NOT EXISTS rag_conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   member_id UUID NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   
-  -- Conversation
   query TEXT NOT NULL,
   response TEXT,
   language VARCHAR(20) DEFAULT 'en',
   
-  -- Context
-  relevant_bylaws JSONB, -- References to retrieved bylaw chunks
+  relevant_bylaws JSONB,
   confidence_score DECIMAL(3, 2),
   
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   
-  INDEX idx_member_date (member_id, created_at),
-  INDEX idx_org_date (organization_id, created_at)
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE INDEX idx_rag_conversations_member ON rag_conversations(member_id, created_at);
+CREATE INDEX idx_rag_conversations_org ON rag_conversations(organization_id, created_at);
+
 -- 16. SETTINGS & CONFIGURATION
-CREATE TABLE organization_settings (
+CREATE TABLE IF NOT EXISTS organization_settings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL UNIQUE REFERENCES organizations(id) ON DELETE CASCADE,
   
-  -- Financial Settings
   default_loan_interest_rate DECIMAL(5, 2),
   default_penalty_amount DECIMAL(15, 2),
   late_payment_threshold_days INT DEFAULT 7,
   
-  -- AI/ML Settings
   ai_agent_enabled BOOLEAN DEFAULT TRUE,
   preferred_languages JSONB DEFAULT '["en", "sw"]'::jsonb,
   
-  -- Notification Settings
   auto_reminders_enabled BOOLEAN DEFAULT TRUE,
   reminder_days_before INT DEFAULT 3,
   
@@ -327,14 +341,78 @@ CREATE TABLE organization_settings (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 17. CURRENCIES TABLE (Reference data)
+CREATE TABLE IF NOT EXISTS currencies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code VARCHAR(3) NOT NULL UNIQUE,
+  name VARCHAR(100) NOT NULL,
+  symbol VARCHAR(10) NOT NULL,
+  region VARCHAR(50) NOT NULL,
+  decimal_places INT DEFAULT 2,
+  is_active BOOLEAN DEFAULT TRUE,
+  notes TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_currencies_code ON currencies(code);
+CREATE INDEX idx_currencies_region ON currencies(region);
+
+-- 18. AFRICAN COUNTRIES TABLE (Reference data)
+CREATE TABLE IF NOT EXISTS african_countries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  country_code VARCHAR(2) NOT NULL UNIQUE,
+  country_name VARCHAR(100) NOT NULL,
+  region VARCHAR(50) NOT NULL,
+  currency_code VARCHAR(3) NOT NULL REFERENCES currencies(code),
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_african_countries_code ON african_countries(country_code);
+CREATE INDEX idx_african_countries_currency ON african_countries(currency_code);
+CREATE INDEX idx_african_countries_region ON african_countries(region);
+
 -- ============================================================================
--- ROW LEVEL SECURITY (RLS) POLICIES for Supabase
+-- HELPER VIEW - Organization with Currency Details
+-- ============================================================================
+CREATE OR REPLACE VIEW organization_details_with_currency AS
+SELECT
+  o.id,
+  o.name,
+  o.description,
+  ac.country_name,
+  ac.country_code,
+  ac.region,
+  c.code as currency_code,
+  c.name as currency_name,
+  c.symbol as currency_symbol,
+  c.decimal_places,
+  o.timezone,
+  o.status,
+  o.created_at,
+  o.updated_at
+FROM organizations o
+LEFT JOIN african_countries ac ON o.country_code = ac.country_code
+LEFT JOIN currencies c ON o.currency_code = c.code;
+
+-- ============================================================================
+-- Enable Row Level Security (RLS)
 -- ============================================================================
 
-ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE loans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contributions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE currencies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE african_countries ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================================
+-- RLS POLICIES for Supabase
+-- ============================================================================
 
 -- Example: Members can only view their own transactions
 CREATE POLICY "members_view_own_transactions" ON transactions
@@ -355,12 +433,3 @@ CREATE POLICY "treasurer_edit_transactions" ON transactions
      AND organization_id = transactions.organization_id) 
     IN (SELECT id FROM roles WHERE name IN ('treasurer', 'admin'))
   );
-
--- ============================================================================
--- INDEXES for Performance Optimization
--- ============================================================================
-
-CREATE INDEX idx_member_roles_org ON member_roles(organization_id);
-CREATE INDEX idx_transactions_type ON transactions(type);
-CREATE INDEX idx_loans_member ON loans(member_id);
-CREATE INDEX idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
